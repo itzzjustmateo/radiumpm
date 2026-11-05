@@ -1,0 +1,13 @@
+{
+  "name": "node-project",
+  "author": "definitely_me",
+  "version": "1.0.0",
+  "private": true,
+  "description": "",
+  "main": "index.js",
+  "scripts": {},
+  "dependencies": {
+    "typescript": "7.0.2"
+  },
+  "devDependencies": {}
+}

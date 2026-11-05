@@ -1,0 +1,9 @@
+{
+  "name": "node-project",
+  "lockfileVersion": 1,
+  "packages": {
+    "typescript": {
+      "version": "7.0.2"
+    }
+  }
+}
