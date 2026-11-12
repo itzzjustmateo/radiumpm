@@ -1,5 +1,3 @@
-set shell := ["bash", "-cu"]
-
 default: check
 
 # Format all Rust sources.
