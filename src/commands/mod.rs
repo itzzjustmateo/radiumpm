@@ -1,6 +1,7 @@
 mod add;
 mod doctor;
 mod init;
+mod migrate;
 mod run;
 mod upgrade;
 
@@ -15,6 +16,7 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
         Command::New { dir_name, author } => init::create_new(dir_name, author),
         Command::Add { package_name } => add::add(&package_name),
         Command::Upgrade => upgrade::upgrade(),
+        Command::Migrate { source, force } => migrate::run(source, force),
         Command::Run { script, args } => run::run(&script, &args),
         Command::Doctor => doctor::run(),
     }

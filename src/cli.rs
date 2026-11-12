@@ -1,4 +1,18 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// Lockfile ecosystems supported by `radium migrate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MigrationSource {
+    /// npm's package-lock.json
+    #[value(alias = "npm")]
+    Node,
+
+    /// Deno's deno.lock
+    Deno,
+
+    /// Bun's bun.lock or bun.lockb
+    Bun,
+}
 
 /// Command-line interface for Radium.
 #[derive(Debug, Parser)]
@@ -37,12 +51,23 @@ pub enum Command {
     /// Reinstall every dependency at its latest version
     Upgrade,
 
-    /// Run a script from package.json using the configured JavaScript runtime
+    /// Convert another package manager's lockfile into radium.lock
+    Migrate {
+        /// Source lockfile ecosystem
+        #[arg(value_enum)]
+        source: MigrationSource,
+
+        /// Overwrite an existing radium.lock
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Run a package.json script or a .ts/.js/.mjs file
     Run {
-        /// Script name from the `scripts` section of package.json
+        /// Script name or path to a .ts/.js/.mjs file
         script: String,
 
-        /// Arguments appended to the script command
+        /// Arguments appended to the script or file command
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod installer;
 mod lockfile;
+mod migrate;
 mod project;
 mod registry;
 mod runtime;
