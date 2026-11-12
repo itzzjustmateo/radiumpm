@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 use crate::project::PackageJson;
 
@@ -115,7 +115,7 @@ impl Runtime {
 
         for (event, event_args) in lifecycle {
             if let Some(script) = package.scripts.get(&event) {
-                let code = self.execute(root, package, &event, script, event_args)?;
+                let code = self.execute_script(root, package, &event, script, event_args)?;
                 if code != 0 {
                     return Ok(code);
                 }
@@ -125,7 +125,37 @@ impl Runtime {
         Ok(0)
     }
 
-    fn execute(
+    /// Run a `.ts`, `.js`, or `.mjs` file directly with the runtime.
+    pub fn run_file(
+        &self,
+        root: &Path,
+        package: &PackageJson,
+        file: &str,
+        args: &[String],
+    ) -> Result<u8> {
+        let requested = Path::new(file);
+        let resolved = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            root.join(requested)
+        };
+
+        if !resolved.is_file() {
+            bail!("File not found: {}", resolved.display());
+        }
+
+        let mut command = Command::new(self.kind.executable());
+        command.arg(&resolved).args(args);
+        self.configure(&mut command, root, package)?;
+
+        let status = command
+            .status()
+            .with_context(|| format!("Failed to run {}", resolved.display()))?;
+
+        Ok(exit_code(status))
+    }
+
+    fn execute_script(
         &self,
         root: &Path,
         package: &PackageJson,
@@ -136,11 +166,23 @@ impl Runtime {
         let mut command = shell_command();
         command
             .arg(command_line(script, args))
+            .env("npm_lifecycle_event", event)
+            .env("npm_lifecycle_script", script);
+
+        self.configure(&mut command, root, package)?;
+
+        let status = command.status().with_context(|| {
+            format!("Failed to run `{event}` with `{}`", self.kind.executable())
+        })?;
+
+        Ok(exit_code(status))
+    }
+
+    fn configure(&self, command: &mut Command, root: &Path, package: &PackageJson) -> Result<()> {
+        command
             .current_dir(root)
             .env("PATH", build_path(root)?)
             .env("RADIUM_RUNTIME", self.kind.name())
-            .env("npm_lifecycle_event", event)
-            .env("npm_lifecycle_script", script)
             .env(
                 "npm_package_name",
                 package.name.as_deref().unwrap_or_default(),
@@ -150,13 +192,21 @@ impl Runtime {
                 package.version.as_deref().unwrap_or_default(),
             );
 
-        let status = command.status().with_context(|| {
-            format!("Failed to run `{event}` with `{}`", self.kind.executable())
-        })?;
-
-        let code = status.code().unwrap_or(1);
-        Ok(u8::try_from(code).unwrap_or(1))
+        Ok(())
     }
+}
+
+/// Whether a `radium run` target should be treated as a source file rather
+/// than a package.json script name.
+pub fn is_runnable_file(target: &str) -> bool {
+    matches!(
+        Path::new(target).extension().and_then(OsStr::to_str),
+        Some("ts" | "js" | "mjs")
+    )
+}
+
+fn exit_code(status: ExitStatus) -> u8 {
+    u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)
 }
 
 fn shell_command() -> Command {
@@ -240,5 +290,19 @@ mod tests {
     fn runtime_names_are_stable() {
         assert_eq!(RuntimeKind::Node.name(), "node");
         assert_eq!(RuntimeKind::Node.executable(), "node");
+    }
+
+    #[test]
+    fn detects_runnable_files() {
+        for file in ["index.ts", "src/index.js", "index.mjs", "/tmp/a.js"] {
+            assert!(is_runnable_file(file), "{file} should be a file target");
+        }
+
+        for target in ["dev", "build", "index.tsx", "index.cjs", "index"] {
+            assert!(
+                !is_runnable_file(target),
+                "{target} should be a script target"
+            );
+        }
     }
 }

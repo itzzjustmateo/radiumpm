@@ -30,6 +30,7 @@ pub fn add(package_name: &str) -> Result<u8> {
 
     let mut package = PackageJson::load(&root)?;
     package.set_dependency(package_name, &version);
+    package.mark_as_radium_project();
     package.save(&root)?;
 
     // Preserve packages that were locked before this command, then overlay

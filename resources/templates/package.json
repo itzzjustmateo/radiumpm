@@ -2,6 +2,7 @@
   "name": "{{NAME}}",
   "author": "{{AUTHOR}}",
   "version": "1.0.0",
+  "packageManager": "radium",
   "private": true,
   "description": "",
   "main": "index.js",

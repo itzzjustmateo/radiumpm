@@ -22,6 +22,13 @@ pub struct PackageJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<Value>,
 
+    #[serde(
+        default,
+        rename = "packageManager",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub package_manager: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private: Option<bool>,
 
@@ -69,6 +76,11 @@ impl PackageJson {
         self.dependencies
             .insert(name.to_string(), version.to_string());
     }
+
+    /// Mark this package as managed by Radium.
+    pub fn mark_as_radium_project(&mut self) {
+        self.package_manager = Some("radium".to_string());
+    }
 }
 
 /// Whether `root` already looks like a Radium project.
@@ -94,8 +106,12 @@ pub fn create(root: &Path, name: &str, author: &str) -> Result<()> {
         .with_context(|| format!("Failed to create project directory {}", root.display()))?;
 
     let package_json = PACKAGE_TEMPLATE
-        .replace("{{NAME}}", name)
-        .replace("{{AUTHOR}}", author);
+        .replace("\"{{NAME}}\"", &serde_json::to_string(name)?)
+        .replace("\"{{AUTHOR}}\"", &serde_json::to_string(author)?);
+
+    // Fail early if the template or substitutions ever produce invalid JSON.
+    serde_json::from_str::<PackageJson>(&package_json)
+        .context("Failed to render the package.json template")?;
 
     fs::write(PackageJson::path(root), package_json)
         .with_context(|| format!("Failed to create {}", PackageJson::path(root).display()))?;
@@ -142,6 +158,19 @@ mod tests {
     }
 
     #[test]
+    fn escapes_template_values() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        create(dir.path(), "weird\"name", "A \"quoted\" author").expect("create project");
+
+        let package = PackageJson::load(dir.path()).expect("load package.json");
+        assert_eq!(package.name.as_deref(), Some("weird\"name"));
+        assert_eq!(
+            package.author.as_ref().and_then(|author| author.as_str()),
+            Some("A \"quoted\" author")
+        );
+    }
+
+    #[test]
     fn create_writes_template_without_overwriting_index() {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = dir.path().join("index.ts");
@@ -151,6 +180,7 @@ mod tests {
 
         let package = PackageJson::load(dir.path()).expect("load package.json");
         assert_eq!(package.name.as_deref(), Some("demo"));
+        assert_eq!(package.package_manager.as_deref(), Some("radium"));
         assert_eq!(
             fs::read_to_string(index).expect("read index"),
             "// custom\n"

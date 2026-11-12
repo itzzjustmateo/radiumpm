@@ -43,6 +43,7 @@ pub fn upgrade() -> Result<u8> {
         ui::info(format!("Updated {name} to {version}"));
     }
 
+    package.mark_as_radium_project();
     package.save(&root)?;
     Lockfile::from_versions(package.name.clone(), installer.resolved()).save(&root)?;
 
