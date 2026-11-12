@@ -9,8 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tar::Archive;
 
+use crate::hash::to_hex;
+use crate::lockfile::Lockfile;
 use crate::project::PackageJson;
-use crate::registry::{Dist, Registry};
+use crate::registry::{Dist, Registry, ResolvedPackage};
 use crate::ui;
 
 /// Installs packages from the registry into a project's `node_modules`.
@@ -39,6 +41,10 @@ impl<'a> Installer<'a> {
     /// The dependency tree is flat, so if a package is already resolved in this
     /// run the existing version is reused. Circular dependencies are safe
     /// because the package is recorded before its dependencies are visited.
+    ///
+    /// Version ranges are re-resolved against fresh registry metadata. Use
+    /// [`Installer::install_locked`] for reproducible installs from
+    /// `radium.lock`.
     pub fn install(&mut self, name: &str, requested: &str) -> Result<String> {
         validate_package_name(name)?;
 
@@ -46,8 +52,79 @@ impl<'a> Installer<'a> {
             return Ok(version.clone());
         }
 
-        let document = self.registry.package(name)?;
+        let document = self.registry.package_fresh(name)?;
         let package = self.registry.resolve(&document, requested)?;
+        self.install_package(name, &package)?;
+
+        for (dependency, requirement) in &package.dependencies {
+            self.install(dependency, requirement)?;
+        }
+
+        Ok(package.version)
+    }
+
+    /// Install `name` at the exact version recorded in `radium.lock`.
+    ///
+    /// Every package in the dependency graph must have a lockfile entry; a
+    /// missing entry is an error rather than an invitation to re-resolve, which
+    /// keeps builds reproducible.
+    pub fn install_locked(&mut self, name: &str, lockfile: &Lockfile) -> Result<String> {
+        validate_package_name(name)?;
+
+        if let Some(version) = self.resolved.get(name) {
+            return Ok(version.clone());
+        }
+
+        let version = lockfile
+            .packages
+            .get(name)
+            .map(|package| package.version.clone())
+            .with_context(|| {
+                format!(
+                    "`{name}` is not recorded in radium.lock; run `radium add {name}` or `radium upgrade` to update the lockfile"
+                )
+            })?;
+
+        let package = self.resolve_locked(name, &version)?;
+        self.install_package(name, &package)?;
+
+        for dependency in package.dependencies.keys() {
+            self.install_locked(dependency, lockfile)?;
+        }
+
+        Ok(package.version)
+    }
+
+    /// Resolve the metadata for an exact locked version.
+    ///
+    /// Cached per-version metadata is preferred so installs can work offline.
+    /// When it is unavailable, the registry document is consulted (using its
+    /// cache when possible) and only refetched if the version is missing.
+    fn resolve_locked(&self, name: &str, version: &str) -> Result<ResolvedPackage> {
+        if let Some(cache) = self.registry.cache() {
+            match cache.package_version(name, version) {
+                Ok(Some(package)) => return Ok(package.into_resolved()),
+                Ok(None) => {}
+                Err(error) => {
+                    ui::warn(format!(
+                        "Ignoring unreadable cached metadata for {name}@{version}: {error:#}"
+                    ));
+                }
+            }
+        }
+
+        let document = self.registry.package(name)?;
+        match self.registry.resolve_exact(&document, version) {
+            Ok(package) => Ok(package),
+            Err(_) => {
+                let document = self.registry.package_fresh(name)?;
+                self.registry.resolve_exact(&document, version)
+            }
+        }
+    }
+
+    /// Download (or reuse) and extract one resolved package.
+    fn install_package(&mut self, name: &str, package: &ResolvedPackage) -> Result<()> {
         let destination = self.root.join("node_modules").join(name);
 
         let existing_version = PackageJson::load(&destination)
@@ -58,19 +135,58 @@ impl<'a> Installer<'a> {
             ui::info(format!("Using existing {name}@{}", package.version));
         } else {
             ui::info(format!("Downloading {name}@{}...", package.version));
-            let tarball = self.registry.download(&package.dist.tarball)?;
-            verify_integrity(&tarball, &package.dist)?;
+            let tarball = self.tarball(name, package)?;
             extract_package(&tarball, &destination)?;
         }
 
         self.resolved
             .insert(name.to_string(), package.version.clone());
 
-        for (dependency, requirement) in &package.dependencies {
-            self.install(dependency, requirement)?;
+        if let Some(cache) = self.registry.cache() {
+            cache.record_package(name, package)?;
         }
 
-        Ok(package.version)
+        Ok(())
+    }
+
+    /// Return a verified tarball, reusing the content-addressed cache when it is
+    /// valid and downloading it otherwise.
+    fn tarball(&self, name: &str, package: &ResolvedPackage) -> Result<Vec<u8>> {
+        if let Some(cache) = self.registry.cache()
+            && let Some(hash) = cache.tarball_hash(name, &package.version)?
+        {
+            match cache.read_tarball(&hash) {
+                Ok(Some(bytes)) if verify_integrity(&bytes, &package.dist).is_ok() => {
+                    return Ok(bytes);
+                }
+                Ok(Some(_)) => {
+                    ui::warn(format!(
+                        "Cached tarball for {name}@{} failed verification; downloading it again",
+                        package.version
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    ui::warn(format!(
+                        "Ignoring unreadable cached tarball for {name}@{}: {error:#}",
+                        package.version
+                    ));
+                }
+            }
+
+            cache.remove_tarball_entry(name, &package.version)?;
+            cache.remove_tarball(&hash)?;
+        }
+
+        let bytes = self.registry.download(&package.dist.tarball)?;
+        verify_integrity(&bytes, &package.dist)?;
+
+        if let Some(cache) = self.registry.cache() {
+            let hash = cache.write_tarball(&bytes)?;
+            cache.record_tarball(name, &package.version, &hash)?;
+        }
+
+        Ok(bytes)
     }
 }
 
@@ -257,17 +373,6 @@ fn find_content_root(temporary: &Path) -> Result<PathBuf> {
     Ok(temporary.to_path_buf())
 }
 
-fn to_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        // Writing to a String cannot fail.
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,7 +471,16 @@ mod tests {
     }
 
     #[test]
-    fn writes_hex() {
-        assert_eq!(to_hex(&[0x00, 0x0f, 0xff]), "000fff");
+    fn locked_install_requires_a_lockfile_entry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = Registry::without_cache().expect("registry");
+        let mut installer = Installer::new(&registry, dir.path());
+        let lockfile = Lockfile::from_versions(None, &BTreeMap::new());
+
+        let error = installer
+            .install_locked("missing", &lockfile)
+            .expect_err("missing lockfile entry should fail");
+
+        assert!(format!("{error:#}").contains("is not recorded in radium.lock"));
     }
 }

@@ -20,17 +20,22 @@ today, with a runtime abstraction designed so Deno and Bun can be added later.
 - npm-style semver resolution: dist-tags, exact versions, `^`/`~` ranges, `>=` comparators,
   hyphen ranges, `x` wildcards, and `||` alternatives
 - SHA-512/SHA-256/SHA-1 integrity verification for downloaded tarballs
-- `upgrade` — re-resolve every dependency in `package.json` to the latest version
-- `run` — execute `package.json` scripts with Node.js, including `pre`/`post` hooks and
-  `node_modules/.bin` on `PATH`
+- `install` — restore every dependency at the exact versions in `radium.lock` without re-resolving
+- `cache` — manage the shared content-addressed package cache
+- `migrate` — convert `package-lock.json`, `deno.lock`, or `bun.lock`/`bun.lockb` into
+  `radium.lock`
+- `run` — execute `package.json` scripts or `.ts`/`.js`/`.mjs` files with Node.js, including
+  `pre`/`post` script hooks and `node_modules/.bin` on `PATH`
 - `doctor` — report the active runtime, project metadata, and lockfile status
 - Gzip/tar extraction of npm tarballs into `node_modules`
 - Deterministic, sorted lockfiles that include transitive packages
+- A `packageManager` field in generated projects that identifies Radium
 
 ## Requirements
 
 - Rust 1.88 or newer (edition 2024)
 - Node.js 18 or newer for `radium run` and `radium doctor`
+- Node.js 22.18 or newer for running `.ts` files without extra flags (erasable TypeScript only)
 - Network access to `https://registry.npmjs.org` (or a configured mirror)
 
 ## Installation
@@ -59,6 +64,7 @@ radium new my-app --author "Jane Doe"
 
 Prompts for a project name when omitted, then writes `package.json`, `radium.lock`, and an
 `index.ts` starter file inside `my-app/`. The author is prompted for when `--author` is omitted.
+The generated `package.json` includes `"packageManager": "radium"`.
 
 ### Initialize an existing directory
 
@@ -81,6 +87,18 @@ installs its dependencies recursively, and records the resolved version in `pack
 `radium.lock`. If the current directory is not a Radium project, you'll be asked whether to
 initialize one first.
 
+### Install from the lockfile
+
+```bash
+radium install
+```
+
+Restores `node_modules` from the exact versions recorded in `radium.lock`. Radium removes the
+existing `node_modules` first, then installs every direct dependency and its transitive
+dependencies at the locked versions. Version ranges are not re-resolved, and `radium.lock` is
+never modified; a dependency that is missing from the lockfile is an error. Run `radium add` or
+`radium upgrade` when you intentionally want to update the lockfile.
+
 ### Upgrade everything
 
 ```bash
@@ -90,14 +108,61 @@ radium upgrade
 Removes `node_modules`, reinstalls every dependency at its latest version, and refreshes the
 lockfile.
 
-### Run a script
+### Manage the package cache
+
+Radium caches registry metadata and package tarballs so repeat installs do not download the same
+files again. The cache is shared across projects and stored in the platform cache directory:
+
+| Platform | Default location |
+| --- | --- |
+| Linux | `~/.cache/radium/` (or `$XDG_CACHE_HOME/radium/`) |
+| macOS | `~/Library/Caches/radium/` |
+| Windows | `%LOCALAPPDATA%\radium\Cache\` |
+
+Tarballs are content-addressed by SHA-256 under `packages/sha256/<prefix>/<hash>`. Metadata is
+stored under `metadata/registry/` and `metadata/packages/`, and per-package tarball indexes live
+under `index/`.
+
+```bash
+radium cache clear            # delete the entire cache
+radium cache clear typescript # delete only typescript's cached metadata and tarballs
+```
+
+Clearing one package leaves tarballs that are still referenced by another cached package in
+place. Set `RADIUM_CACHE_DIR` to use a different cache location, for example in CI or for a
+project-local cache.
+
+### Migrate from another package manager
+
+```bash
+radium migrate node   # package-lock.json (`npm` is accepted as an alias)
+radium migrate deno   # deno.lock
+radium migrate bun    # bun.lock or bun.lockb
+```
+
+Reads the source lockfile, collapses it into Radium's flat dependency tree, writes `radium.lock`,
+and marks `package.json` with `"packageManager": "radium"`. An existing `radium.lock` is protected;
+pass `--force` to overwrite it.
+
+For npm v2/v3 lockfiles the shallowest version of each package wins; Deno and Bun migrations keep
+the highest resolved version. Non-registry specs such as `file:`, `workspace:`, and `github:` are
+skipped. Binary `bun.lockb` files are converted with Bun itself, so Bun must be installed:
+
+```bash
+bun install --save-text-lockfile --frozen-lockfile --lockfile-only
+```
+
+Radium runs that command for you, removes the generated `bun.lock`, and leaves the original
+`bun.lockb` untouched. Set `RADIUM_BUN` to use a specific Bun executable.
+
+### Run a script or file
 
 Add a script to `package.json`:
 
 ```json
 {
   "scripts": {
-    "build": "tsc",
+    "dev": "node server.js",
     "greet": "node -e \"console.log('hello ' + process.argv[1])\""
   }
 }
@@ -106,14 +171,30 @@ Add a script to `package.json`:
 Then run it:
 
 ```bash
-radium run build
+radium run dev
 radium run greet world
 ```
+
+`radium run` can also execute a source file directly. If the target ends in `.ts`, `.js`, or
+`.mjs`, Radium treats it as a file relative to the project root and forwards any extra
+arguments to the runtime:
+
+```bash
+radium run index.ts
+radium run ./scripts/build.js --watch
+radium run hello.mjs world
+```
+
+Otherwise the target is looked up as a `package.json` script. Missing scripts produce an error
+that lists the scripts that are available. TypeScript files rely on Node's native type
+stripping, so only erasable TypeScript syntax is supported (no enums, namespaces, or parameter
+properties without a build step).
 
 Scripts execute through the platform shell (`sh -c` or `cmd /C`) with `node_modules/.bin`
 prepended to `PATH`. `pre<script>` and `post<script>` hooks run automatically, and npm-style
 environment variables such as `npm_lifecycle_event`, `npm_package_name`, and
-`npm_package_version` are provided.
+`npm_package_version` are provided. File targets run directly without a shell, with
+`node_modules/.bin` still available on `PATH`.
 
 ### Check your environment
 
@@ -129,7 +210,9 @@ the lockfile status. Exits non-zero when the runtime is missing or a project fil
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `RADIUM_REGISTRY` | `https://registry.npmjs.org` | Registry base URL, useful for mirrors |
+| `RADIUM_CACHE_DIR` | platform cache directory | Override the shared package cache location |
 | `RADIUM_RUNTIME` | `node` | JavaScript runtime used by `radium run` and `doctor` |
+| `RADIUM_BUN` | `bun` | Bun executable used by `radium migrate bun` to convert `bun.lockb` |
 
 `RADIUM_RUNTIME` currently accepts `node`/`nodejs`. `deno` and `bun` are recognized and
 rejected with an explanatory error until their adapters are implemented.
@@ -148,29 +231,37 @@ rejected with an explanatory error until their adapters are implemented.
 ├── src/
 │   ├── main.rs                 # Thin CLI entry point
 │   ├── cli.rs                  # clap command definitions
-│   ├── commands/               # init, new, add, upgrade, run, doctor
-│   ├── installer.rs            # Dependency resolution, download, extraction
+│   ├── commands/               # init, new, add, install, upgrade, migrate, cache, run, doctor
+│   ├── cache.rs                # Content-addressed tarball and metadata cache
+│   ├── hash.rs                 # SHA-256 helpers
+│   ├── installer.rs            # Dependency resolution, download, extraction, locked installs
 │   ├── lockfile.rs             # radium.lock model and persistence
+│   ├── migrate.rs              # npm, Deno, and Bun lockfile conversion
 │   ├── project.rs              # package.json model and scaffolding
-│   ├── registry.rs             # npm registry client and semver resolution
+│   ├── registry.rs             # npm registry client, cache-aware metadata, semver resolution
 │   ├── runtime.rs              # Pluggable JavaScript runtime (Node today)
 │   └── ui.rs                   # Prompts and user-facing output
 ├── tests/cli.rs                # End-to-end CLI tests, including Node integration
 ├── resources/templates/        # Scaffolding templates
-└── node-project/               # Example project used for manual testing
+└── test-project/               # Local scratch project for manual testing
 ```
 
 ## How it works
 
-1. `radium add <name>` fetches `https://registry.npmjs.org/<name>`.
+1. `radium add <name>` fetches `https://registry.npmjs.org/<name>` and caches the registry
+   document under the shared cache directory.
 2. The requested version is resolved from dist-tags, an exact version, or an npm semver range.
-3. The tarball is downloaded and checked against the registry's integrity metadata.
+   `radium install` skips this step and uses the exact version from `radium.lock` instead.
+3. The tarball is downloaded (or read from the content-addressed cache) and checked against the
+   registry's integrity metadata.
 4. The tarball is gunzipped and unpacked into a temporary directory beside the destination.
 5. The contents of the archive's `package/` folder are moved into `node_modules/<name>`.
 6. Dependencies listed in the package metadata are installed with the same routine; the flat
-   tree reuses an already-resolved version to avoid cycles.
+   tree reuses an already-resolved version to avoid cycles. `radium install` requires every
+   transitive dependency to have a lockfile entry.
 7. Resolved versions are written to `package.json` (direct dependencies) and `radium.lock`
-   (direct and transitive packages).
+   (direct and transitive packages). `radium install` never changes either file apart from
+   marking `packageManager`.
 
 ## Lockfile format
 
@@ -220,10 +311,12 @@ This is a prototype, and the following are intentional simplifications:
 
 - The dependency tree is flat — there is no nested `node_modules` resolution or deduplication.
 - `devDependencies` are not installed.
-- There is no `install`-from-lockfile, `remove`, or install-time lifecycle script support yet.
+- Package `bin` entries are not linked into `node_modules/.bin` yet, so scripts should invoke
+  tools through `node` directly.
+- There is no `remove` or install-time lifecycle script support yet.
 - Git, file, tarball, workspace, and npm alias version specs are not supported.
 - Only the Node.js runtime is implemented for `radium run`; Deno and Bun adapters are planned.
-- Downloads are sequential with no shared cache or concurrency.
+- Downloads are sequential; the shared cache avoids repeat downloads but there is no concurrency.
 
 See [TODO.md](TODO.md) for the planned work.
 

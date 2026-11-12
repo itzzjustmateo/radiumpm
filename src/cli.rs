@@ -48,6 +48,9 @@ pub enum Command {
         package_name: String,
     },
 
+    /// Install every dependency at the exact versions in radium.lock
+    Install,
+
     /// Reinstall every dependency at its latest version
     Upgrade,
 
@@ -74,4 +77,20 @@ pub enum Command {
 
     /// Show environment and project diagnostics
     Doctor,
+
+    /// Manage the shared package cache
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
+}
+
+/// Subcommands for `radium cache`.
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Delete the entire cache, or only one package's cached files
+    Clear {
+        /// Package name; omit to clear the entire cache
+        package: Option<String>,
+    },
 }

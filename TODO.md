@@ -6,6 +6,7 @@ ordered roughly by usefulness rather than difficulty.
 ## JavaScript runtime
 
 - [x] Detect Node.js and use it to execute `package.json` scripts
+- [x] Run `.ts`, `.js`, and `.mjs` files directly with `radium run <file> [args...]`
 - [x] Run `pre<script>` / `post<script>` hooks and expose npm-style lifecycle variables
 - [x] Add `node_modules/.bin` to `PATH` for scripts
 - [x] Add `radium doctor` to report the active runtime and project health
@@ -22,19 +23,23 @@ ordered roughly by usefulness rather than difficulty.
 
 ## Package management
 
-- [ ] Read `radium.lock` during install so builds are reproducible without re-resolving
+- [x] Read `radium.lock` during install so builds are reproducible without re-resolving
 - [ ] Install `devDependencies` with a `--save-dev` / `--production` distinction
 - [ ] Support `radium remove <package>`
-- [ ] Support `radium install` to restore an entire project from `package.json` + lockfile
+- [x] Support `radium install` to restore an entire project from `package.json` + lockfile
+- [x] Add `radium migrate <node|deno|bun>` to convert npm, Deno, and Bun lockfiles into `radium.lock`
 - [ ] Support explicit version specs such as `radium add typescript@5`
-- [ ] Support scoped packages end-to-end in the lockfile and install output
+- [x] Support scoped packages in installs and lockfile entries
 - [ ] Add nested `node_modules` resolution and deduplication
-- [ ] Add a download cache shared across projects
+- [ ] Link package `bin` entries into `node_modules/.bin`, including Windows `.cmd` shims
+- [x] Add a download cache shared across projects (`packages/sha256`, metadata, index, tmp)
+- [x] Add `radium cache clear [package]` to manage the shared cache
 - [ ] Parallelize package downloads and extraction
 - [ ] Record tarball URLs and integrity hashes in the lockfile
 - [ ] Verify installed package contents and detect lockfile drift
 - [ ] Run install-time lifecycle scripts (`preinstall`, `install`, `postinstall`) with an opt-out
-- [ ] Support `packageManager` and `engines` fields
+- [x] Write `"packageManager": "radium"` in generated and managed package.json files
+- [ ] Validate `packageManager` and `engines` fields and warn on mismatches
 - [ ] Handle optional dependencies and platform-specific packages
 
 ## Code quality

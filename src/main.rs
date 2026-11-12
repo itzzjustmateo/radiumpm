@@ -1,5 +1,7 @@
+mod cache;
 mod cli;
 mod commands;
+mod hash;
 mod installer;
 mod lockfile;
 mod migrate;

@@ -1,30 +1,33 @@
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use semver::{Version, VersionReq};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::time::Duration;
+
+use crate::cache::Cache;
+use crate::ui;
 
 const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
 const USER_AGENT: &str = concat!("radium/", env!("CARGO_PKG_VERSION"));
 
 /// The parts of an npm package document that Radium uses.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PackageDocument {
     #[serde(rename = "dist-tags", default)]
     pub dist_tags: BTreeMap<String, String>,
     pub versions: BTreeMap<String, VersionDocument>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VersionDocument {
     pub dist: Dist,
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Dist {
     pub tarball: String,
     #[serde(default)]
@@ -41,30 +44,90 @@ pub struct ResolvedPackage {
     pub dependencies: BTreeMap<String, String>,
 }
 
+/// Whether cached registry metadata may be reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CachePolicy {
+    /// Reuse cached metadata when it is available.
+    Prefer,
+    /// Always fetch fresh metadata and refresh the cache.
+    Refresh,
+}
+
 /// A blocking client for the npm registry.
 pub struct Registry {
     client: Client,
     base_url: String,
+    cache: Option<Cache>,
 }
 
 impl Registry {
-    /// Create a registry client. The base URL can be overridden with
-    /// `RADIUM_REGISTRY` for mirrors or local test registries.
+    /// Create a registry client backed by the platform cache.
     pub fn new() -> Result<Self> {
-        let client = Client::builder()
-            .user_agent(USER_AGENT)
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .context("Failed to create HTTP client")?;
-
-        let base_url = env::var("RADIUM_REGISTRY").unwrap_or_else(|_| DEFAULT_REGISTRY.to_string());
-
-        Ok(Self { client, base_url })
+        Self::with_cache(Cache::new()?)
     }
 
-    /// Fetch the package document for `name`.
+    /// Create a registry client that uses an explicit cache.
+    pub fn with_cache(cache: Cache) -> Result<Self> {
+        Ok(Self {
+            client: build_client()?,
+            base_url: base_url(),
+            cache: Some(cache),
+        })
+    }
+
+    /// Create a registry client that never reads or writes cached metadata.
+    #[cfg(test)]
+    pub fn without_cache() -> Result<Self> {
+        Ok(Self {
+            client: build_client()?,
+            base_url: base_url(),
+            cache: None,
+        })
+    }
+
+    /// The cache used by this client, if any.
+    pub fn cache(&self) -> Option<&Cache> {
+        self.cache.as_ref()
+    }
+
+    /// Fetch the package document for `name`, preferring cached metadata.
     pub fn package(&self, name: &str) -> Result<PackageDocument> {
+        self.package_with_policy(name, CachePolicy::Prefer)
+    }
+
+    /// Fetch the package document for `name`, bypassing cached metadata.
+    ///
+    /// This is used by commands that intentionally re-resolve versions, such as
+    /// `radium add` and `radium upgrade`.
+    pub fn package_fresh(&self, name: &str) -> Result<PackageDocument> {
+        self.package_with_policy(name, CachePolicy::Refresh)
+    }
+
+    fn package_with_policy(&self, name: &str, policy: CachePolicy) -> Result<PackageDocument> {
+        if let Some(cache) = &self.cache
+            && policy == CachePolicy::Prefer
+        {
+            match cache.read_registry_metadata(name) {
+                Ok(Some(document)) => return Ok(document),
+                Ok(None) => {}
+                Err(error) => {
+                    ui::warn(format!(
+                        "Ignoring unreadable cached metadata for {name}: {error:#}"
+                    ));
+                }
+            }
+        }
+
+        let document = self.fetch_package(name)?;
+
+        if let Some(cache) = &self.cache {
+            cache.write_registry_metadata(name, &document)?;
+        }
+
+        Ok(document)
+    }
+
+    fn fetch_package(&self, name: &str) -> Result<PackageDocument> {
         // Scoped packages must be percent-encoded in the registry URL.
         let encoded_name = name.replace('/', "%2F");
         let url = format!("{}/{}", self.base_url.trim_end_matches('/'), encoded_name);
@@ -147,6 +210,37 @@ impl Registry {
             dependencies: metadata.dependencies.clone(),
         })
     }
+
+    /// Resolve an exact, already-pinned version from a package document.
+    pub fn resolve_exact(
+        &self,
+        document: &PackageDocument,
+        version: &str,
+    ) -> Result<ResolvedPackage> {
+        let metadata = document
+            .versions
+            .get(version)
+            .with_context(|| format!("Registry metadata is missing version {version}"))?;
+
+        Ok(ResolvedPackage {
+            version: version.to_string(),
+            dist: metadata.dist.clone(),
+            dependencies: metadata.dependencies.clone(),
+        })
+    }
+}
+
+fn build_client() -> Result<Client> {
+    Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .context("Failed to create HTTP client")
+}
+
+fn base_url() -> String {
+    env::var("RADIUM_REGISTRY").unwrap_or_else(|_| DEFAULT_REGISTRY.to_string())
 }
 
 /// Parse npm's range syntax into one or more semver requirements.
@@ -253,6 +347,7 @@ mod tests {
         Registry {
             client: Client::new(),
             base_url: DEFAULT_REGISTRY.to_string(),
+            cache: None,
         }
     }
 
