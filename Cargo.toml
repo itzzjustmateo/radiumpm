@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 description = "A small, experimental package manager for JavaScript/TypeScript projects"
 publish = false
+default-run = "radium"
 
 [dependencies]
 anyhow = "1.0.104"

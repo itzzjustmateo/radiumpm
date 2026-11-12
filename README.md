@@ -15,6 +15,9 @@ today, with a runtime abstraction designed so Deno and Bun can be added later.
 ## Features
 
 - `init` / `new` — scaffold a project with `package.json`, `radium.lock`, and `index.ts`
+- `init <template>` / `create <folder> --template <template>` — scaffold with an npm initializer
+  such as `next`, `vite`, or `create-*`
+- `x` / `exec` / `radix` — run a package executable without installing it into the project
 - `add` — resolve and install a package from the npm registry
 - Recursive install of a package's runtime dependencies
 - npm-style semver resolution: dist-tags, exact versions, `^`/`~` ranges, `>=` comparators,
@@ -34,7 +37,7 @@ today, with a runtime abstraction designed so Deno and Bun can be added later.
 ## Requirements
 
 - Rust 1.88 or newer (edition 2024)
-- Node.js 18 or newer for `radium run` and `radium doctor`
+- Node.js 18 or newer for `radium run`, `radium doctor`, and package executables
 - Node.js 22.18 or newer for running `.ts` files without extra flags (erasable TypeScript only)
 - Network access to `https://registry.npmjs.org` (or a configured mirror)
 
@@ -53,6 +56,8 @@ The binary is produced at `target/release/radium`. To put it on your `PATH`:
 ```bash
 cargo install --path .
 ```
+
+This also installs `radix`, a shortcut for `radium x`.
 
 ## Usage
 
@@ -75,6 +80,22 @@ radium init
 
 Uses the current directory name as the project name and prompts for the author. Radium refuses
 to overwrite an existing `package.json`; remove or rename it first.
+
+### Scaffold from a template
+
+```bash
+radium init next
+radium create my-app --template vite
+```
+
+Templates run the matching npm initializer for you. `radium init <template>` scaffolds into the
+current directory, while `radium create <folder> --template <template>` scaffolds into
+`<folder>`. The initializer is installed in a scratch directory, so it is not added to the
+project's dependencies.
+
+Built-in templates are `next`, `vite`, `vue`, `svelte`, `astro`, `nuxt`, and `react`. Any other
+name resolves to the conventional `create-<name>@latest` package; for example,
+`radium create my-app --template solid` runs `create-solid`.
 
 ### Install a package
 
@@ -196,6 +217,24 @@ environment variables such as `npm_lifecycle_event`, `npm_package_name`, and
 `npm_package_version` are provided. File targets run directly without a shell, with
 `node_modules/.bin` still available on `PATH`.
 
+### Run a package executable
+
+```bash
+radium x typescript --version
+radium exec create-next-app@latest my-app
+radix next-app@latest .
+```
+
+`x`, `exec`, and the `radix` binary run an executable from an npm package without adding it to
+the project. Radium resolves the package spec, installs it into a scratch directory (reusing the
+shared cache when possible), and forwards the remaining arguments to the package's `bin` entry.
+The process runs in your current directory, so initializers scaffold in place.
+
+The package spec accepts a plain name (`typescript`), a version or tag (`typescript@5.7.2`,
+`typescript@next`), or a scoped name (`@scope/tool`). `next-app` is shorthand for
+`create-next-app`. Because the installation is temporary, `x` and `radix` never modify the
+project's `node_modules`, `package.json`, or `radium.lock`.
+
 ### Check your environment
 
 ```bash
@@ -211,7 +250,7 @@ the lockfile status. Exits non-zero when the runtime is missing or a project fil
 | --- | --- | --- |
 | `RADIUM_REGISTRY` | `https://registry.npmjs.org` | Registry base URL, useful for mirrors |
 | `RADIUM_CACHE_DIR` | platform cache directory | Override the shared package cache location |
-| `RADIUM_RUNTIME` | `node` | JavaScript runtime used by `radium run` and `doctor` |
+| `RADIUM_RUNTIME` | `node` | JavaScript runtime used by `radium run`, `radix`, and `doctor` |
 | `RADIUM_BUN` | `bun` | Bun executable used by `radium migrate bun` to convert `bun.lockb` |
 
 `RADIUM_RUNTIME` currently accepts `node`/`nodejs`. `deno` and `bun` are recognized and
@@ -229,9 +268,11 @@ rejected with an explanatory error until their adapters are implemented.
 ├── .cargo/config.toml          # Cargo aliases
 ├── .github/workflows/          # CI and release automation
 ├── src/
-│   ├── main.rs                 # Thin CLI entry point
+│   ├── main.rs                 # Thin `radium` binary entry point
+│   ├── lib.rs                  # Shared library entry points for `radium` and `radix`
+│   ├── bin/radix.rs            # Thin `radix` binary entry point
 │   ├── cli.rs                  # clap command definitions
-│   ├── commands/               # init, new, add, install, upgrade, migrate, cache, run, doctor
+│   ├── commands/               # init, new, create, add, install, upgrade, migrate, cache, run, x, doctor
 │   ├── cache.rs                # Content-addressed tarball and metadata cache
 │   ├── hash.rs                 # SHA-256 helpers
 │   ├── installer.rs            # Dependency resolution, download, extraction, locked installs
@@ -240,6 +281,8 @@ rejected with an explanatory error until their adapters are implemented.
 │   ├── project.rs              # package.json model and scaffolding
 │   ├── registry.rs             # npm registry client, cache-aware metadata, semver resolution
 │   ├── runtime.rs              # Pluggable JavaScript runtime (Node today)
+│   ├── spec.rs                 # npx-style package spec parsing
+│   ├── templates.rs            # Built-in template to initializer mapping
 │   └── ui.rs                   # Prompts and user-facing output
 ├── tests/cli.rs                # End-to-end CLI tests, including Node integration
 ├── resources/templates/        # Scaffolding templates
@@ -312,8 +355,10 @@ This is a prototype, and the following are intentional simplifications:
 - The dependency tree is flat — there is no nested `node_modules` resolution or deduplication.
 - `devDependencies` are not installed.
 - Package `bin` entries are not linked into `node_modules/.bin` yet, so scripts should invoke
-  tools through `node` directly.
+  tools through `node` directly. The `x`, `exec`, and `radix` commands can still run package
+  executables from a scratch installation.
 - There is no `remove` or install-time lifecycle script support yet.
+- Template names map to `create-*` initializers by convention; there is no template registry.
 - Git, file, tarball, workspace, and npm alias version specs are not supported.
 - Only the Node.js runtime is implemented for `radium run`; Deno and Bun adapters are planned.
 - Downloads are sequential; the shared cache avoids repeat downloads but there is no concurrency.

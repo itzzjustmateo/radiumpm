@@ -4,7 +4,10 @@ use std::path::Path;
 
 use crate::lockfile::Lockfile;
 use crate::project::{self, PackageJson};
+use crate::templates::Template;
 use crate::ui;
+
+use super::exec;
 
 /// `radium init`
 pub fn initialize() -> Result<u8> {
@@ -40,6 +43,22 @@ pub fn create_new(dir_name: Option<String>, author: Option<String>) -> Result<u8
     scaffold(Path::new(&name), &name, &author)?;
 
     Ok(0)
+}
+
+/// `radium init <template>`
+pub fn initialize_from_template(template: &str) -> Result<u8> {
+    let template = Template::resolve(template)?;
+    exec::run_template(&template, ".")
+}
+
+/// `radium create <folder> --template <template>`
+pub fn create_from_template(dir_name: &str, template: &str) -> Result<u8> {
+    if dir_name.trim().is_empty() {
+        bail!("Project directory cannot be empty");
+    }
+
+    let template = Template::resolve(template)?;
+    exec::run_template(&template, dir_name)
 }
 
 /// Create package.json, radium.lock, and a starter source file.

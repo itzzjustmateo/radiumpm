@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use crate::project::PackageJson;
@@ -155,6 +155,44 @@ impl Runtime {
         Ok(exit_code(status))
     }
 
+    /// Run an executable installed inside a package tree.
+    ///
+    /// `install_root` is the directory whose `node_modules` contains the
+    /// package, while `working_dir` is where the process should run (normally
+    /// the user's current directory, so initializers scaffold in place).
+    /// JavaScript bins run through the configured runtime, which avoids relying
+    /// on executable bits in the installed archive.
+    pub fn run_package_bin(
+        &self,
+        working_dir: &Path,
+        install_root: &Path,
+        package: &PackageJson,
+        bin: &Path,
+        args: &[String],
+    ) -> Result<u8> {
+        let mut command = if is_javascript_file(bin) {
+            let mut command = Command::new(self.kind.executable());
+            command.arg(bin);
+            command
+        } else {
+            Command::new(bin)
+        };
+
+        command.args(args);
+        self.configure_for(
+            &mut command,
+            working_dir,
+            Some(package),
+            &[install_root.join("node_modules").join(".bin")],
+        )?;
+
+        let status = command
+            .status()
+            .with_context(|| format!("Failed to run {}", bin.display()))?;
+
+        Ok(exit_code(status))
+    }
+
     fn execute_script(
         &self,
         root: &Path,
@@ -179,18 +217,34 @@ impl Runtime {
     }
 
     fn configure(&self, command: &mut Command, root: &Path, package: &PackageJson) -> Result<()> {
+        self.configure_for(command, root, Some(package), &[])
+    }
+
+    /// Configure a child process with the runtime environment and a `PATH` that
+    /// includes the project's and any extra `node_modules/.bin` directories.
+    fn configure_for(
+        &self,
+        command: &mut Command,
+        directory: &Path,
+        package: Option<&PackageJson>,
+        extra_paths: &[PathBuf],
+    ) -> Result<()> {
         command
-            .current_dir(root)
-            .env("PATH", build_path(root)?)
-            .env("RADIUM_RUNTIME", self.kind.name())
-            .env(
-                "npm_package_name",
-                package.name.as_deref().unwrap_or_default(),
-            )
-            .env(
-                "npm_package_version",
-                package.version.as_deref().unwrap_or_default(),
-            );
+            .current_dir(directory)
+            .env("PATH", build_path(directory, extra_paths)?)
+            .env("RADIUM_RUNTIME", self.kind.name());
+
+        if let Some(package) = package {
+            command
+                .env(
+                    "npm_package_name",
+                    package.name.as_deref().unwrap_or_default(),
+                )
+                .env(
+                    "npm_package_version",
+                    package.version.as_deref().unwrap_or_default(),
+                );
+        }
 
         Ok(())
     }
@@ -221,8 +275,18 @@ fn shell_command() -> Command {
     }
 }
 
-fn build_path(root: &Path) -> Result<OsString> {
+/// Whether `path` is a JavaScript or TypeScript file that should be handed to
+/// the runtime instead of being executed directly.
+fn is_javascript_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("js" | "mjs" | "cjs" | "ts" | "mts" | "cts")
+    )
+}
+
+fn build_path(root: &Path, extra_paths: &[PathBuf]) -> Result<OsString> {
     let mut entries = vec![root.join("node_modules").join(".bin")];
+    entries.extend(extra_paths.iter().cloned());
 
     if let Some(path) = env::var_os("PATH") {
         entries.extend(env::split_paths(&path));

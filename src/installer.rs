@@ -12,7 +12,7 @@ use tar::Archive;
 use crate::hash::to_hex;
 use crate::lockfile::Lockfile;
 use crate::project::PackageJson;
-use crate::registry::{Dist, Registry, ResolvedPackage};
+use crate::registry::{CachePolicy, Dist, Registry, ResolvedPackage};
 use crate::ui;
 
 /// Installs packages from the registry into a project's `node_modules`.
@@ -43,21 +43,38 @@ impl<'a> Installer<'a> {
     /// because the package is recorded before its dependencies are visited.
     ///
     /// Version ranges are re-resolved against fresh registry metadata. Use
-    /// [`Installer::install_locked`] for reproducible installs from
+    /// [`Installer::install_cached`] for one-off executions that should work
+    /// offline, or [`Installer::install_locked`] for reproducible installs from
     /// `radium.lock`.
     pub fn install(&mut self, name: &str, requested: &str) -> Result<String> {
+        self.install_with(name, requested, CachePolicy::Refresh)
+    }
+
+    /// Install `name` for a one-off execution, preferring cached metadata.
+    ///
+    /// This is the same resolution as [`Installer::install`] except that a
+    /// cached registry document is used when available, so packages that were
+    /// seen before can run without network access.
+    pub fn install_cached(&mut self, name: &str, requested: &str) -> Result<String> {
+        self.install_with(name, requested, CachePolicy::Prefer)
+    }
+
+    fn install_with(&mut self, name: &str, requested: &str, policy: CachePolicy) -> Result<String> {
         validate_package_name(name)?;
 
         if let Some(version) = self.resolved.get(name) {
             return Ok(version.clone());
         }
 
-        let document = self.registry.package_fresh(name)?;
+        let document = match policy {
+            CachePolicy::Prefer => self.registry.package(name)?,
+            CachePolicy::Refresh => self.registry.package_fresh(name)?,
+        };
         let package = self.registry.resolve(&document, requested)?;
         self.install_package(name, &package)?;
 
         for (dependency, requirement) in &package.dependencies {
-            self.install(dependency, requirement)?;
+            self.install_with(dependency, requirement, policy)?;
         }
 
         Ok(package.version)

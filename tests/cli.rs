@@ -11,6 +11,16 @@ fn radium(directory: &Path) -> Command {
     command
 }
 
+fn radix(directory: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_radix"));
+    command.current_dir(directory);
+    command
+}
+
+fn node_is_available() -> bool {
+    Command::new("node").arg("--version").output().is_ok()
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -18,22 +28,64 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn make_tarball() -> Vec<u8> {
+fn make_tarball_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
-    let contents = br#"{"name":"demo","version":"1.0.0"}"#;
-    let mut header = tar::Header::new_gnu();
-    header.set_size(contents.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder
-        .append_data(&mut header, "package/package.json", &contents[..])
-        .expect("append archive entry");
+
+    for &(path, contents) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, contents)
+            .expect("append archive entry");
+    }
 
     builder
         .into_inner()
         .expect("finish archive")
         .finish()
         .expect("finish gzip")
+}
+
+fn make_tarball() -> Vec<u8> {
+    make_tarball_with(&[(
+        "package/package.json",
+        br#"{"name":"demo","version":"1.0.0"}"#,
+    )])
+}
+
+fn make_executable_tarball(name: &str) -> Vec<u8> {
+    let package_json =
+        format!(r#"{{"name":"{name}","version":"1.0.0","bin":{{"{name}":"cli.js"}}}}"#);
+
+    make_tarball_with(&[
+        ("package/package.json", package_json.as_bytes()),
+        (
+            "package/cli.js",
+            br#"console.log('ran ' + process.argv.slice(2).join(' '));
+"#,
+        ),
+    ])
+}
+
+fn make_template_tarball(name: &str) -> Vec<u8> {
+    let package_json =
+        format!(r#"{{"name":"{name}","version":"1.0.0","bin":{{"{name}":"cli.js"}}}}"#);
+
+    make_tarball_with(&[
+        ("package/package.json", package_json.as_bytes()),
+        (
+            "package/cli.js",
+            br#"const fs = require('fs');
+const path = require('path');
+const target = process.argv[2] || '.';
+fs.mkdirSync(target, { recursive: true });
+fs.writeFileSync(path.join(target, 'scaffolded.txt'), 'from template');
+console.log('scaffolding ' + target);
+"#,
+        ),
+    ])
 }
 
 fn write_cached_package(cache: &Path, name: &str, version: &str, tarball: &[u8]) -> String {
@@ -53,6 +105,16 @@ fn write_cached_package(cache: &Path, name: &str, version: &str, tarball: &[u8])
         ),
     )
     .expect("write package metadata");
+
+    let registry_dir = cache.join("metadata").join("registry");
+    fs::create_dir_all(&registry_dir).expect("create registry metadata dir");
+    fs::write(
+        registry_dir.join(format!("{encoded}.json")),
+        format!(
+            r#"{{"dist-tags":{{"latest":"{version}"}},"versions":{{"{version}":{{"dist":{{"tarball":"http://127.0.0.1:1/{name}.tgz"}},"dependencies":{{}}}}}}}}"#
+        ),
+    )
+    .expect("write registry metadata");
 
     let index_dir = cache.join("index");
     fs::create_dir_all(&index_dir).expect("create index dir");
@@ -86,6 +148,145 @@ fn help_lists_the_run_command() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("doctor"));
     assert!(stdout.contains("run"));
+}
+
+#[test]
+fn help_lists_the_exec_and_template_commands() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let output = radium(directory.path())
+        .arg("--help")
+        .output()
+        .expect("run radium");
+
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Run a package executable"));
+    assert!(stdout.contains("Create a project from a template"));
+}
+
+#[test]
+fn x_runs_a_cached_package_executable_offline() {
+    if !node_is_available() {
+        eprintln!("skipping executable integration test: node is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let cache = directory.path().join("cache");
+    let tarball = make_executable_tarball("demo-cli");
+    write_cached_package(&cache, "demo-cli", "1.0.0", &tarball);
+
+    let output = radium(directory.path())
+        .env("RADIUM_CACHE_DIR", &cache)
+        .env("RADIUM_REGISTRY", "http://127.0.0.1:1")
+        .args(["x", "demo-cli", "hello", "world"])
+        .output()
+        .expect("run radium x");
+
+    assert_success(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ran hello world"));
+    assert!(
+        !directory.path().join("node_modules").exists(),
+        "x should install into a scratch directory"
+    );
+}
+
+#[test]
+fn exec_alias_runs_a_cached_package_executable_offline() {
+    if !node_is_available() {
+        eprintln!("skipping executable integration test: node is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let cache = directory.path().join("cache");
+    let tarball = make_executable_tarball("demo-cli");
+    write_cached_package(&cache, "demo-cli", "1.0.0", &tarball);
+
+    let output = radium(directory.path())
+        .env("RADIUM_CACHE_DIR", &cache)
+        .env("RADIUM_REGISTRY", "http://127.0.0.1:1")
+        .args(["exec", "demo-cli@1.0.0", "--flag"])
+        .output()
+        .expect("run radium exec");
+
+    assert_success(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ran --flag"));
+}
+
+#[test]
+fn radix_runs_a_cached_package_executable_offline() {
+    if !node_is_available() {
+        eprintln!("skipping executable integration test: node is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let cache = directory.path().join("cache");
+    let tarball = make_executable_tarball("demo-cli");
+    write_cached_package(&cache, "demo-cli", "1.0.0", &tarball);
+
+    let output = radix(directory.path())
+        .env("RADIUM_CACHE_DIR", &cache)
+        .env("RADIUM_REGISTRY", "http://127.0.0.1:1")
+        .args(["demo-cli", "from-radix"])
+        .output()
+        .expect("run radix");
+
+    assert_success(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ran from-radix"));
+}
+
+#[test]
+fn init_with_a_template_scaffolds_in_place() {
+    if !node_is_available() {
+        eprintln!("skipping template integration test: node is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let cache = directory.path().join("cache");
+    let tarball = make_template_tarball("create-demo");
+    write_cached_package(&cache, "create-demo", "1.0.0", &tarball);
+
+    let output = radium(directory.path())
+        .env("RADIUM_CACHE_DIR", &cache)
+        .env("RADIUM_REGISTRY", "http://127.0.0.1:1")
+        .args(["init", "demo"])
+        .output()
+        .expect("run radium init demo");
+
+    assert_success(&output);
+    assert!(directory.path().join("scaffolded.txt").is_file());
+}
+
+#[test]
+fn create_with_a_template_scaffolds_a_directory() {
+    if !node_is_available() {
+        eprintln!("skipping template integration test: node is not installed");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let cache = directory.path().join("cache");
+    let tarball = make_template_tarball("create-demo");
+    write_cached_package(&cache, "create-demo", "1.0.0", &tarball);
+
+    let output = radium(directory.path())
+        .env("RADIUM_CACHE_DIR", &cache)
+        .env("RADIUM_REGISTRY", "http://127.0.0.1:1")
+        .args(["create", "my-app", "--template", "demo"])
+        .output()
+        .expect("run radium create");
+
+    assert_success(&output);
+    assert!(
+        directory
+            .path()
+            .join("my-app")
+            .join("scaffolded.txt")
+            .is_file()
+    );
 }
 
 #[test]

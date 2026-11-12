@@ -31,9 +31,11 @@ ordered roughly by usefulness rather than difficulty.
 - [ ] Support explicit version specs such as `radium add typescript@5`
 - [x] Support scoped packages in installs and lockfile entries
 - [ ] Add nested `node_modules` resolution and deduplication
-- [ ] Link package `bin` entries into `node_modules/.bin`, including Windows `.cmd` shims
 - [x] Add a download cache shared across projects (`packages/sha256`, metadata, index, tmp)
 - [x] Add `radium cache clear [package]` to manage the shared cache
+- [x] Run one-off package executables with `radium x`, `radium exec`, and the `radix` binary
+- [x] Scaffold projects from templates with `radium init <template>` and `radium create <folder> --template <template>`
+- [ ] Link package `bin` entries into `node_modules/.bin`, including Windows `.cmd` shims
 - [ ] Parallelize package downloads and extraction
 - [ ] Record tarball URLs and integrity hashes in the lockfile
 - [ ] Verify installed package contents and detect lockfile drift
@@ -44,7 +46,7 @@ ordered roughly by usefulness rather than difficulty.
 
 ## Code quality
 
-- [ ] Introduce a library target so integration tests can exercise internals directly
+- [x] Introduce a library target so integration tests can exercise internals directly
 - [ ] Add property-based tests for npm semver range normalization
 - [ ] Add a test registry fixture (or recorded HTTP fixtures) for offline install tests
 - [ ] Replace the remaining stringly-typed JSON access in package metadata with typed models

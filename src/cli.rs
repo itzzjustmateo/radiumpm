@@ -30,7 +30,10 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Initialize a Radium project in the current directory
-    Init,
+    Init {
+        /// Template to scaffold with, for example `next` or `vite`
+        template: Option<String>,
+    },
 
     /// Create a new project directory
     New {
@@ -40,6 +43,16 @@ pub enum Command {
         /// Project author
         #[arg(short, long)]
         author: Option<String>,
+    },
+
+    /// Create a project from a template
+    Create {
+        /// Directory to create
+        dir_name: String,
+
+        /// Template to use, for example `next` or `vite`
+        #[arg(short, long)]
+        template: String,
     },
 
     /// Add a dependency from the npm registry
@@ -75,6 +88,17 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// Run a package executable without adding it to the project (npx-style)
+    #[command(visible_alias = "exec")]
+    X {
+        /// Package spec, for example `typescript` or `next-app@latest`
+        package: String,
+
+        /// Arguments forwarded to the executable
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show environment and project diagnostics
     Doctor,
 
@@ -93,4 +117,21 @@ pub enum CacheCommand {
         /// Package name; omit to clear the entire cache
         package: Option<String>,
     },
+}
+
+/// Command-line interface for `radix`, the one-off executable runner.
+#[derive(Debug, Parser)]
+#[command(
+    name = "radix",
+    version,
+    about = "Run an npm package executable without installing it into a project",
+    long_about = None
+)]
+pub struct RadixCli {
+    /// Package spec, for example `typescript` or `next-app@latest`
+    pub package: String,
+
+    /// Arguments forwarded to the executable
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
 }

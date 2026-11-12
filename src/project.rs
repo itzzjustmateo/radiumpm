@@ -32,6 +32,9 @@ pub struct PackageJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private: Option<bool>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin: Option<Value>,
+
     #[serde(default)]
     pub scripts: BTreeMap<String, String>,
 
@@ -80,6 +83,41 @@ impl PackageJson {
     /// Mark this package as managed by Radium.
     pub fn mark_as_radium_project(&mut self) {
         self.package_manager = Some("radium".to_string());
+    }
+
+    /// Executable entries declared by this package, keyed by command name.
+    ///
+    /// npm allows `bin` to be either a single path (the command is named after
+    /// the package) or an object mapping command names to paths.
+    pub fn bins(&self) -> BTreeMap<String, String> {
+        let Some(bin) = &self.bin else {
+            return BTreeMap::new();
+        };
+
+        match bin {
+            Value::String(path) => {
+                let name = self
+                    .name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default();
+
+                if name.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    BTreeMap::from([(name.to_string(), path.clone())])
+                }
+            }
+            Value::Object(entries) => entries
+                .iter()
+                .filter_map(|(name, value)| {
+                    value.as_str().map(|path| (name.clone(), path.to_string()))
+                })
+                .collect(),
+            _ => BTreeMap::new(),
+        }
     }
 }
 
